@@ -1,10 +1,14 @@
+import contextlib
 import os
 import platform
+import shutil
 import subprocess
 import sys
-import uuid
+import tempfile
 import threading
 import time
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +46,102 @@ def _packaged_binary_path() -> Path:
     return base / f"codex{ext}"
 
 
+def _package_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _omnara_libs_dir() -> Path:
+    return _package_root().parent / "omnara.libs"
+
+
+def _extract_from_wheel(dest: Path, libs_dir: Path) -> bool:
+    """Download the platform wheel and extract the Codex binary/libs."""
+    try:
+        from importlib.metadata import version as pkg_version
+    except Exception:  # pragma: no cover - best effort fallback
+        return False
+
+    try:
+        current_version = pkg_version("omnara")
+    except Exception:
+        return False
+
+    tag, ext, _ = _platform_tag()
+    target_entry = f"omnara/_bin/codex/{tag}/codex{ext}"
+
+    with tempfile.TemporaryDirectory(prefix="omnara-fetch-") as tmp_dir:
+        wheel_dir = Path(tmp_dir)
+        try:
+            print(
+                "[omnara] Codex binary not bundled; attempting to fetch packaged wheel...",
+                file=sys.stderr,
+            )
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "download",
+                    f"omnara=={current_version}",
+                    "--only-binary=:all:",
+                    "--no-deps",
+                    "--dest",
+                    str(wheel_dir),
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except Exception:
+            return False
+
+        wheel_path = next(wheel_dir.glob("omnara-*.whl"), None)
+        if not wheel_path:
+            return False
+
+        try:
+            with zipfile.ZipFile(wheel_path) as zf:
+                if target_entry not in zf.namelist():
+                    print(
+                        "[omnara] Downloaded wheel missing Codex binary; aborting fetch.",
+                        file=sys.stderr,
+                    )
+                    return False
+
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(target_entry) as src, open(dest, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+                members = [n for n in zf.namelist() if n.startswith("omnara.libs/")]
+                if members:
+                    libs_dir.mkdir(parents=True, exist_ok=True)
+                    for name in members:
+                        rel = name.split("/", 1)[1]
+                        if not rel:
+                            continue
+                        target = libs_dir / rel
+                        if name.endswith("/"):
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(name) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+
+        except Exception:
+            return False
+
+        if os.name != "nt":
+            with contextlib.suppress(Exception):
+                mode = os.stat(dest).st_mode
+                os.chmod(dest, mode | 0o111)
+
+        print(
+            "[omnara] Codex binary fetched from wheel and cached locally.",
+            file=sys.stderr,
+        )
+        return dest.exists()
+
+
 def _env_binary_path() -> Optional[Path]:
     """Return a path from OMNARA_CODEX_PATH if set.
 
@@ -68,6 +168,10 @@ def _resolve_codex_binary() -> Path:
     # 2) packaged in the wheel
     packaged = _packaged_binary_path()
     if packaged.exists():
+        return packaged
+
+    libs_dir = _omnara_libs_dir()
+    if _extract_from_wheel(packaged, libs_dir):
         return packaged
 
     raise FileNotFoundError(
@@ -101,6 +205,21 @@ def run_codex(args, unknown_args, api_key: str):
         env["OMNARA_API_URL"] = args.base_url
     # Ensure there is a stable session ID shared with the Rust process
     session_id = env.setdefault("OMNARA_SESSION_ID", str(uuid.uuid4()))
+
+    libs_dir = _omnara_libs_dir()
+    if libs_dir.exists():
+        if os.name == "nt":
+            sep = ";"
+            env_var = "PATH"
+        else:
+            sep = ":"
+            env_var = "LD_LIBRARY_PATH"
+        current = env.get(env_var)
+        if current:
+            if str(libs_dir) not in current.split(sep):
+                env[env_var] = f"{libs_dir}{sep}{current}"
+        else:
+            env[env_var] = str(libs_dir)
 
     # Ensure executable bit if running from packaged file on Unix
     try:
