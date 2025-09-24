@@ -30,7 +30,12 @@ case "$OS" in
     ;;
 esac
 
-DEST_DIR="omnara/_bin/codex/${ARCH_TAG}"
+PACKAGE_ROOT="omnara"
+if [[ -d "src/omnara" ]]; then
+  PACKAGE_ROOT="src/omnara"
+fi
+
+DEST_DIR="${PACKAGE_ROOT}/_bin/codex/${ARCH_TAG}"
 DEST="${DEST_DIR}/codex${BIN_EXT}"
 
 # If a binary is already present (e.g., fetched from a previous release), reuse it
@@ -138,14 +143,14 @@ fi
 
 # Build codex-cli (Rust) in release mode as a fallback
 echo "[cibw_before_build] Building codex-cli (fallback build)"
-pushd integrations/cli_wrappers/codex/codex-rs >/dev/null
+pushd src/integrations/cli_wrappers/codex/codex-rs >/dev/null
 
 cargo build --release -p codex-cli
 
 popd >/dev/null
 
 # Compute path to built binary (absolute or rooted at repo)
-SRC="integrations/cli_wrappers/codex/codex-rs/target/release/codex${BIN_EXT}"
+SRC="src/integrations/cli_wrappers/codex/codex-rs/target/release/codex${BIN_EXT}"
 
 # Install built binary into wheel payload
 echo "[cibw_before_build] Installing Codex binary to ${DEST}"
